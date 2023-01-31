@@ -7,6 +7,7 @@ import glob
 import scipy.interpolate as sint
 import itertools
 from mpi4py import MPI
+import scipy.constants as c
 
 comm = MPI.COMM_WORLD
 size = comm.Get_size()
@@ -34,15 +35,15 @@ rank = comm.Get_rank()
 #F-09 3338 60.193235 22.292532 1.050570 0.389078 
 #B-08 3338 69.198433 18.024550 1.207740 0.314588 
 #A-01 1287 123.543139 23.352234 2.156235 0.407573 
-
+lam=c.c/53.5e6
 phases_deg=n.array([160.706296, # 433
                     17.715985,  # A
                     5.499101,   # B
-                    0,          # B
-                    -5.865708,  # C
-                    -12.842389, # D
-                    4.229617,   # E
-                    -8.033325,  # F
+                    0,          # C
+                    -5.865708,  # D
+                    -12.842389, # E
+                    4.229617,   # F
+                    -8.033325,  # M
                     123.543139, # A-01
                     76.720319,  # B-06
                     82.305434,  # C-02
@@ -108,10 +109,8 @@ def read_ud3(fname="GEMINIDS/20221212_023647112_event.ud3"):
 
     # phase cal
     for i in range(16):
-        z2[:,:,i]=z2[:,:,i]*n.exp(-1j*phases_rad[i])
+        z2[:,:,i]=z2[:,:,i]*n.exp(1j*phases_rad[i])
         
-
-    
     print(len(z))
     print(M_DATAPOINTS)
     print(M_GATES)
@@ -143,8 +142,8 @@ def uv_coverage(x,y,pairs,N=1000):
     u=n.zeros(len(pairs))
     v=n.zeros(len(pairs))
     for pi in range(len(pairs)):
-        u[pi]=x[pairs[pi][0]]-x[pairs[pi][1]]
-        v[pi]=y[pairs[pi][0]]-y[pairs[pi][1]]
+        u[pi]=x[pairs[pi][1]]-x[pairs[pi][0]]
+        v[pi]=y[pairs[pi][1]]-y[pairs[pi][0]]
 
     urange=2*n.max([n.abs(n.max(u)),n.abs(n.min(u))])
     vrange=2*n.max([n.abs(n.max(v)),n.abs(n.min(v))])    
@@ -159,9 +158,33 @@ def uv_coverage(x,y,pairs,N=1000):
 
     return(u,v,uidx,vidx)
 
+def kvecs(N=400,maxdcos=0.2,k=2.0*n.pi/lam):
+    l=n.linspace(-maxdcos,maxdcos,num=N)
+    m=n.linspace(-maxdcos,maxdcos,num=N)    
+    ll,mm=n.meshgrid(l,m)
+    nn=n.sqrt(1-ll**2.0+mm**2.0)
+    kvec_x = k*ll
+    kvec_y = k*mm
+    kvec_z = k*nn
+    return(kvec_x,kvec_y,l,m)
+
+def find_angle(u,v,S,kvec_x,kvec_y,l,m):
+    meas = n.exp(1j*n.angle(S))
+
+    MF = n.zeros(kvec_x.shape,dtype=n.complex64)
+    for i in range(len(meas)):
+        MF+=meas[i]*n.exp(-1j*(kvec_x*u[i] + kvec_y*v[i]))
+
+        i,j=n.unravel_index(n.argmax(n.abs(MF)),kvec_x.shape)
+    if False:
+        plt.pcolormesh(n.abs(MF))
+        plt.colorbar()
+        plt.show()
+    return(l[i],m[j])
 
 
-def analyze_file(f,N=100):
+
+def analyze_file(f,N=100,dec=16):
 
     # interpolate codes
     codes=get_codes()
@@ -169,7 +192,9 @@ def analyze_file(f,N=100):
     # read data file
     z,o=read_ud3(fname=f)
 
-    pairs=list(itertools.combinations(n.arange(16,dtype=int),2))
+    #pairs=list(itertools.combinations(n.arange(1,16,dtype=int),2))
+    pairs=[(7,1),(7,2),(7,3),(7,4),(7,5),(7,6),(9,15),(9,10),(10,15),(8,1),(1,4),(2,5),(3,6)]
+    #pairs=[(9,15),(9,10),(10,15)]
     
     n_xspec=len(pairs)
     S=n.zeros([z.shape[0],z.shape[1],n_xspec],dtype=n.complex64)
@@ -205,16 +230,15 @@ def analyze_file(f,N=100):
         C=C[:,:,0,0]
         P=S0
         
-        
-    if aliased:
-        plt.pcolormesh(n.transpose(10.0*n.log10(P)))
-        plt.show()
-    else:
-        plt.pcolormesh(n.transpose(10.0*n.log10(P)))
-        plt.show()
-        
+               
 
     x,y=antenna_pos()
+    if False:
+        for i in range(16):
+            plt.plot(x[i],y[i],"o")
+            plt.text(x[i],y[i],"%s"%(i+1))
+        plt.show()
+        
     u,v,ui,vi=uv_coverage(x,y,pairs,N=N)
     
     #S=n.copy(z)
@@ -241,19 +265,82 @@ def analyze_file(f,N=100):
 
             S[2*i+1,:,pi]=cc0*n.conj(cc1)
             S[2*i+1,:,pi]=S[2*i+1,:,pi]
+
+    avg=n.repeat(float(1.0/dec),dec)
+    for ri in range(S.shape[1]):
+        P[:,ri]=n.convolve(P[:,ri],avg,mode="same")                    
+        for j in range(S.shape[2]):
+            S[:,ri,j]=n.convolve(S[:,ri,j],avg,mode="same")
+
+
             
 
+    if True:
+        plt.pcolormesh(n.transpose(10.0*n.log10(P)))
+        plt.show()
+
+    # remove background
+    for i in range(S.shape[2]):
+        S[:,:,i]=S[:,:,i]-n.median(S[:,:,i])
+
+        
+        
+    # plot cross-phases
+    if False:
+        for i in range(S.shape[2]):
+            plt.subplot(221)
+            plt.pcolormesh(n.transpose(n.angle(S[:,:,i])),cmap="hsv")            
+            plt.title(pairs[i])
+            plt.colorbar()
+            plt.subplot(222)
+            plt.pcolormesh(10.0*n.log10(n.transpose(n.abs(S[:,:,i]))))
+            plt.subplot(223)
+            plt.plot(P[i,:])
+            plt.show()
+
+    ls=[]
+    ms=[]
+    ts=[]
+    rgs=[]
+    kvec_x,kvec_y,lv,mv=kvecs(k=2.0*n.pi/lam,N=400)
     for i in range(S.shape[0]):
         rg=n.argmax(P[i,:])
-        
+        rgs.append(rg*300 + o["m_range"])
+        l,m=find_angle(u,v,S[i,rg,:],kvec_x,kvec_y,lv,mv)
+        ls.append(l)
+        ms.append(m)
+        ts.append(i)
         uidx=n.argsort(u)
         vidx=n.argsort(v)
         print(rg)
-        plt.subplot(121)
-        plt.plot(u[uidx],n.angle(S[i,rg,uidx]),".")
-        plt.subplot(122)
-        plt.plot(v[vidx],n.angle(S[i,rg,vidx]),".")
-        plt.show()
+        if False:
+            plt.subplot(221)
+            plt.plot(u[uidx],n.angle(S[i,rg,uidx]),".")
+            plt.ylim([-n.pi,n.pi])
+            plt.xlabel("East-West baseline (m)")
+            plt.ylabel("Phase (rad)")
+            
+            plt.subplot(222)
+            plt.plot(v[vidx],n.angle(S[i,rg,vidx]),".")
+            plt.ylim([-n.pi,n.pi])        
+            plt.xlabel("North-South baseline (m)")
+            plt.ylabel("Phase (rad)")            
+            
+            plt.subplot(223)        
+            plt.plot(P[i,:])
+            plt.xlabel("Range gate")
+            plt.ylabel("Power")
+            plt.show()
+
+    fig = plt.figure()
+    ax = fig.add_subplot(projection='3d')
+    rgs=n.array(rgs)/1e3
+    ls=n.array(ls)
+    ms=n.array(ms)
+    ns=n.sqrt(1-ls**2.0-ms**2.0)
+    ax.scatter(rgs*ls,rgs*ms,rgs*ns,c=ts)
+#    plt.colorbar()
+    plt.show()
 
         
     tm=n.arange(S.shape[0])*1e-3
@@ -272,8 +359,8 @@ def analyze_file(f,N=100):
     plt.xlabel("Time (s)")
     plt.ylabel("Range (km)")
     plt.tight_layout()
-#    plt.show()
-    plt.savefig("tmp/%s.png"%(f))
+    plt.show()
+#    plt.savefig("tmp/%s.png"%(f))
     plt.clf()
     plt.close()
     del S
@@ -283,7 +370,20 @@ def analyze_file(f,N=100):
 
 
 
-analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_023647112_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_023647112_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_000027554_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_000502142_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_002707808_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_003842936_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_005801200_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_011129196_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_012915974_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_021214752_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_025010212_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_032515792_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_050541196_event.ud3")
+#analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_052206360_event.ud3")
+analyze_file("/data1/geminids/maarsy/GEMINIDS/20221212_055125774_event.ud3")
 
 if __name__ == "__main__":
     fl=glob.glob("/data1/geminids/maarsy/GEMINIDS/2*.ud3")
